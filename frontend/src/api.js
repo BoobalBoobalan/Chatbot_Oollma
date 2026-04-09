@@ -2,7 +2,7 @@ import axios from 'axios';
 
 // Create an axios instance with default config
 const api = axios.create({
-    baseURL: 'http://localhost:8000', // Connects to FastAPI
+    baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000', // Connects to deployed URL or FastAPI locally
     headers: {
         'Content-Type': 'application/json',
     },

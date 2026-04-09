@@ -1,5 +1,6 @@
 import os
 import httpx
+from groq import AsyncGroq
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,12 +27,16 @@ app.add_middleware(
 
 # Configuration
 OLLAMA_API_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# Initialize Groq Client
+# It handles its own session and base URL
+groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # Request Model
 class ChatRequest(BaseModel):
     message: str
-    model: str = "tinyllama" # Default model, can be switched to 'mistral' or others
+    model: str = "llama3-8b-8192" # Default to Groq Llama 3
     use_openai: bool = False
 
 @app.get("/")
@@ -52,41 +57,46 @@ async def chat(request: ChatRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # Optional OpenAI Fallback
+    # Optional OpenAI Fallback (Retained for legacy structure)
     if request.use_openai:
-        if not OPENAI_API_KEY:
-             raise HTTPException(status_code=500, detail="OpenAI API Key not configured")
-        # Note: robust OpenAI implementation omitted to focus on Ollama, 
-        # but this is where you would allow switching logic.
-        return {"response": "OpenAI mode selected but not fully configured in this demo. Please use Ollama."}
+        return {"response": "OpenAI mode selected but not fully configured in this demo. Please use Groq or Ollama."}
     
-    # Ollama Integration
+    # Live Groq API Integration
+    if groq_client and "llama" in request.model.lower() or "mixtral" in request.model.lower():
+        try:
+            chat_completion = await groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": request.message,
+                    }
+                ],
+                model=request.model,
+            )
+            return {"response": chat_completion.choices[0].message.content}
+        except Exception as e:
+            print(f"Groq API Error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Groq API Error: {str(e)}")
+
+    # Local Ollama Fallback (if Groq key missing or standard ollama model requested)
     try:
         async with httpx.AsyncClient() as client:
-            # We use the /api/chat endpoint from Ollama
-            # Docs: https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
             payload = {
                 "model": request.model,
                 "messages": [{"role": "user", "content": request.message}],
                 "stream": False
             }
             
-            # Timeout set to 60s as LLMs can be slow
             response = await client.post(f"{OLLAMA_API_URL}/api/chat", json=payload, timeout=60.0)
             
             if response.status_code != 200:
-                error_detail = response.text
-                print(f"Ollama Error: {error_detail}")
-                raise HTTPException(status_code=response.status_code, detail=f"Ollama Error: {error_detail}")
+                raise HTTPException(status_code=response.status_code, detail=f"Ollama Error: {response.text}")
             
             data = response.json()
-            # Extract the actual response content
-            ai_message = data.get("message", {}).get("content", "")
-            
-            return {"response": ai_message}
+            return {"response": data.get("message", {}).get("content", "")}
 
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail=f"Unable to connect to Ollama at {OLLAMA_API_URL}. Is it running? (Run 'ollama serve')")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail=f"Unable to connect to model API. Check Groq Keys or ensure Ollama is running.")
     except Exception as e:
         print(f"Server Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
